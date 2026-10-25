@@ -122,6 +122,10 @@ pub struct ExportClip {
     /// FFmpeg filter chain from the Filters tab, or empty.
     #[serde(default)]
     pub filter_chain: String,
+    /// The audio links, including parameter keys, used to sample automation
+    /// into the preview and export mix.
+    #[serde(default)]
+    pub audio_effects: Vec<AppliedFilter>,
     /// Playback rate. 1 is normal.
     #[serde(default = "unity")]
     pub speed: f64,
@@ -327,6 +331,7 @@ impl ExportClip {
             fade_in: 0.0,
             fade_out: 0.0,
             filter_chain: String::new(),
+            audio_effects: Vec::new(),
             speed: 1.0,
             preserve_pitch: true,
             speed_curve: Vec::new(),
@@ -1358,13 +1363,43 @@ pub fn audio_buses(clips: &[ExportClip]) -> Vec<audio::AudioBus> {
     layers.sort_by(|a, b| a.track.cmp(&b.track).then(a.start.total_cmp(&b.start)));
     layers
         .into_iter()
-        .map(|clip| audio::AudioBus {
-            start: clip.start,
-            duration: clip.duration,
-            filter_chain: clip.filter_chain.clone(),
-            strength: clip.opacity.clamp(0.0, 1.0),
-            fade_in: clip.fade_in,
-            fade_out: clip.fade_out,
+        .flat_map(|clip| {
+            let has_automation = clip.audio_effects.iter().any(|link| {
+                link.keys.values().any(|keys| !keys.is_empty())
+            });
+            if !has_automation || clip.duration <= 0.0 {
+                return vec![audio::AudioBus {
+                    start: clip.start,
+                    duration: clip.duration,
+                    filter_chain: clip.filter_chain.clone(),
+                    strength: clip.opacity.clamp(0.0, 1.0),
+                    fade_in: clip.fade_in,
+                    fade_out: clip.fade_out,
+                }];
+            }
+            let count = ((clip.duration / 0.1).ceil() as usize).clamp(8, 400);
+            (0..count)
+                .map(|index| {
+                    let x0 = index as f64 / count as f64;
+                    let x1 = (index + 1) as f64 / count as f64;
+                    let middle = (x0 + x1) / 2.0;
+                    let start = clip.start + x0 * clip.duration;
+                    let duration = (x1 - x0) * clip.duration;
+                    let end = start + duration;
+                    let fade_in = (clip.fade_in - x0 * clip.duration).clamp(0.0, duration);
+                    let fade_out_from = clip.start + clip.duration - clip.fade_out;
+                    let fade_out = (end - fade_out_from.max(start)).clamp(0.0, duration);
+                    audio::AudioBus {
+                        start,
+                        duration,
+                        filter_chain: Catalogue::builtin()
+                            .audio_chain_at(&clip.audio_effects, middle),
+                        strength: clip.opacity.clamp(0.0, 1.0),
+                        fade_in: if clip.fade_in > 0.0 { fade_in } else { 0.0 },
+                        fade_out: if clip.fade_out > 0.0 { fade_out } else { 0.0 },
+                    }
+                })
+                .collect()
         })
         .filter(audio::AudioBus::audible)
         .collect()
@@ -1377,21 +1412,64 @@ pub fn audio_buses(clips: &[ExportClip]) -> Vec<audio::AudioBus> {
 pub fn audio_pieces(clip: &ExportClip) -> Vec<AudioClip> {
     let chain = clip.filter_chain.clone();
     let track = volume_track(clip);
+    let automated = clip.audio_effects.iter().any(|link| {
+        link.keys.values().any(|keys| !keys.is_empty())
+    });
+    let chain_at = |at| {
+        if automated {
+            Catalogue::builtin().audio_chain_at(&clip.audio_effects, at)
+        } else {
+            chain.clone()
+        }
+    };
     let Some(curve) = clip.retime() else {
-        return vec![AudioClip {
-            path: PathBuf::from(&clip.path),
-            stream: clip.audio_stream.map(|index| index as usize),
-            start: clip.start,
-            duration: clip.duration,
-            source_start: clip.source_start,
-            speed: audio::clamp_speed(clip.speed),
-            preserve_pitch: clip.preserve_pitch,
-            volume: clip.volume,
-            volume_curve: track,
-            fade_in: clip.fade_in,
-            fade_out: clip.fade_out,
-            filter_chain: chain,
-        }];
+        if !automated || clip.duration <= 0.0 {
+            return vec![AudioClip {
+                path: PathBuf::from(&clip.path),
+                stream: clip.audio_stream.map(|index| index as usize),
+                start: clip.start,
+                duration: clip.duration,
+                source_start: clip.source_start,
+                speed: audio::clamp_speed(clip.speed),
+                preserve_pitch: clip.preserve_pitch,
+                volume: clip.volume,
+                volume_curve: track,
+                fade_in: clip.fade_in,
+                fade_out: clip.fade_out,
+                filter_chain: chain,
+            }];
+        }
+        // Audio effects are evaluated in short spans. This keeps their
+        // settings following keyframes in both the live monitor and export.
+        let count = ((clip.duration / 0.1).ceil() as usize).clamp(8, 400);
+        let speed = audio::clamp_speed(clip.speed);
+        return (0..count)
+            .map(|index| {
+                let x0 = index as f64 / count as f64;
+                let x1 = (index + 1) as f64 / count as f64;
+                let middle = (x0 + x1) / 2.0;
+                let duration = (x1 - x0) * clip.duration;
+                let start = clip.start + x0 * clip.duration;
+                let end = start + duration;
+                let fade_in = (clip.fade_in - x0 * clip.duration).clamp(0.0, duration);
+                let fade_out_from = clip.start + clip.duration - clip.fade_out;
+                let fade_out = (end - fade_out_from.max(start)).clamp(0.0, duration);
+                AudioClip {
+                    path: PathBuf::from(&clip.path),
+                    stream: clip.audio_stream.map(|index| index as usize),
+                    start,
+                    duration,
+                    source_start: clip.source_start + x0 * clip.duration * speed,
+                    speed,
+                    preserve_pitch: clip.preserve_pitch,
+                    volume: clip.volume,
+                    volume_curve: track_slice(&track, x0, x1),
+                    fade_in: if clip.fade_in > 0.0 { fade_in } else { 0.0 },
+                    fade_out: if clip.fade_out > 0.0 { fade_out } else { 0.0 },
+                    filter_chain: chain_at(middle),
+                }
+            })
+            .collect();
     };
     // Pieces a tenth of a second long, or eight at least: fine enough that
     // a tempo step is not heard, coarse enough that the graph stays small.
@@ -1421,7 +1499,7 @@ pub fn audio_pieces(clip: &ExportClip) -> Vec<AudioClip> {
                 volume_curve: track_slice(&track, x0, x1),
                 fade_in: if clip.fade_in > 0.0 { fade_in } else { 0.0 },
                 fade_out: if clip.fade_out > 0.0 { fade_out } else { 0.0 },
-                filter_chain: chain.clone(),
+                filter_chain: chain_at((x0 + x1) / 2.0),
             }
         })
         .collect()

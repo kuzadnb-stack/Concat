@@ -805,6 +805,7 @@ export component ConfigPane inherits Rectangle {
                         noun: I18n.t("common.audioEffect");
                         library-title: I18n.t("configPane.audioEffects");
                         shelf: 2;
+                        audio-chain: true;
                         // A sound layer has no Sound page with their switches,
                         // so its treatments are cards like any other link.
                         hidden: root.selected.kind == ClipKind.sound-layer ? []

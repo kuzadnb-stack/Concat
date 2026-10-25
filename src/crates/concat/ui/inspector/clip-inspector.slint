@@ -147,8 +147,8 @@ export struct AppliedParamData {
     default-value: float,
     value: float,
     fmt: ParamFormat,
-    /// The knob can carry keys - the Adjust panel's can, a chain's cannot
-    /// yet - and, when it can, the same four facts a ClipKeyData holds:
+    /// Whether the knob can carry keys, and, when it can, the same four
+    /// facts a ClipKeyData holds:
     /// it rides at all, a key sits under the playhead, and there is one
     /// behind or ahead to step to.
     keyable: bool,
@@ -278,6 +278,9 @@ export component PresetStack inherits VerticalLayout {
     /// pages: the stack is then the chain alone, with a word on where to
     /// find more when it is empty.
     in property <bool> library: true;
+    /// This stack edits the selected clip's audio chain; its animatable
+    /// package parameters get keyframe controls.
+    in property <bool> audio-chain: false;
     /// The words for an empty chain without a library.
     in property <string> empty-note;
 
@@ -457,6 +460,15 @@ export component PresetStack inherits VerticalLayout {
                                 fmt: p.fmt;
                                 unit: p.unit;
                                 enabled: item.on;
+                                keyable: root.audio-chain && p.keyable;
+                                key-name: "audio-fx|\{p.entry}|\{p.key}";
+                                key-state: {
+                                    field: ClipField.scale,
+                                    keyed: p.keyed,
+                                    here: p.here,
+                                    prev: p.prev,
+                                    next: p.next,
+                                };
                                 changed(v) => {
                                     root.set-param(index, p.key, v);
                                     root.commit();
@@ -826,6 +838,15 @@ component Processor inherits VerticalLayout {
             default-value: p.default-value;
             fmt: p.fmt;
             unit: p.unit;
+            keyable: p.keyable;
+            key-name: "audio-fx|\{p.entry}|\{p.key}";
+            key-state: {
+                field: ClipField.scale,
+                keyed: p.keyed,
+                here: p.here,
+                prev: p.prev,
+                next: p.next,
+            };
             changed(v) => {
                 root.set-param(root.entry, p.key, v);
                 root.commit();

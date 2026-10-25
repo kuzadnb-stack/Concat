@@ -297,6 +297,69 @@ pub(super) fn apply(
             })
         }
 
+        Command::SetAudioEffectKey {
+            clip_id,
+            entry,
+            key,
+            at,
+            value,
+            ease,
+        } => {
+            let timeline = project.active_mut();
+            let Some(link) = timeline
+                .clip_mut(&clip_id)
+                .and_then(|clip| clip.filters.get_mut(entry))
+            else {
+                return Ok(Outcome::default());
+            };
+            if !at.is_finite() || !value.is_finite() {
+                return Ok(Outcome::default());
+            }
+            let before = link.keys.clone();
+            link.set_key(&key, at, value, ease);
+            Ok(Outcome {
+                created_id: None,
+                applied: link.keys != before,
+            })
+        }
+        Command::ClearAudioEffectKey {
+            clip_id,
+            entry,
+            key,
+            at,
+        } => {
+            let timeline = project.active_mut();
+            let Some(link) = timeline
+                .clip_mut(&clip_id)
+                .and_then(|clip| clip.filters.get_mut(entry))
+            else {
+                return Ok(Outcome::default());
+            };
+            let applied = link.clear_key(&key, at);
+            Ok(Outcome {
+                created_id: None,
+                applied,
+            })
+        }
+        Command::ClearAudioEffectKeys {
+            clip_id,
+            entry,
+            key,
+        } => {
+            let timeline = project.active_mut();
+            let Some(link) = timeline
+                .clip_mut(&clip_id)
+                .and_then(|clip| clip.filters.get_mut(entry))
+            else {
+                return Ok(Outcome::default());
+            };
+            let applied = link.clear_keys(&key);
+            Ok(Outcome {
+                created_id: None,
+                applied,
+            })
+        }
+
         Command::SetClipSpeedCurve {
             clip_id,
             curve,

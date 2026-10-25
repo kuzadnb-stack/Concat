@@ -532,6 +532,20 @@ pub enum Command {
         /// The parameter's manifest key.
         key: String,
     },
+    /// Puts a key on one parameter of one link of a clip's audio chain.
+    SetAudioEffectKey {
+        clip_id: String,
+        entry: usize,
+        key: String,
+        at: f64,
+        value: f64,
+        #[serde(default)]
+        ease: KeyEase,
+    },
+    /// Takes the key at `at` off one parameter of one audio link.
+    ClearAudioEffectKey { clip_id: String, entry: usize, key: String, at: f64 },
+    /// Takes every key off one parameter of one audio link.
+    ClearAudioEffectKeys { clip_id: String, entry: usize, key: String },
     /// Sets or clears a picture's cutout: the mask that takes its
     /// background away. Tidied on the way in; see [`Cutout::tidy`].
     SetClipCutout {
@@ -1085,13 +1099,14 @@ impl Command {
                 .iter()
                 .flatten()
                 .flat_map(|point| [point.at, point.speed])),
-            Command::SetClipKey {
-                at, value, ease, ..
+            Command::SetClipKey { at, value, ease, .. }
+            | Command::SetEffectKey { at, value, ease, .. }
+            | Command::SetAudioEffectKey { at, value, ease, .. } => {
+                bad([*at, *value]) || bad(ease.0)
             }
-            | Command::SetEffectKey {
-                at, value, ease, ..
-            } => bad([*at, *value]) || bad(ease.0),
-            Command::ClearClipKey { at, .. } | Command::ClearEffectKey { at, .. } => bad([*at]),
+            Command::ClearClipKey { at, .. }
+            | Command::ClearEffectKey { at, .. }
+            | Command::ClearAudioEffectKey { at, .. } => bad([*at]),
             Command::SetClipCutout { cutout, .. } => cutout.as_ref().is_some_and(|cutout| {
                 bad([cutout.feather]) || cutout.strokes.iter().any(bad_stroke)
             }),
@@ -1256,6 +1271,9 @@ pub fn apply(
         | Command::SetEffectKey { .. }
         | Command::ClearEffectKey { .. }
         | Command::ClearEffectKeys { .. }
+        | Command::SetAudioEffectKey { .. }
+        | Command::ClearAudioEffectKey { .. }
+        | Command::ClearAudioEffectKeys { .. }
         | Command::SetClipSpeedCurve { .. }
         | Command::SetClipTransform { .. }
         | Command::FrameClip { .. }) => properties::apply(project, mint, command),

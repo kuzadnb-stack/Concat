@@ -1445,6 +1445,12 @@ struct ShelfStamp {
 /// The built-in colour package's id; see `adjust_rows` and `Studio::adjust_set`.
 const ADJUST_ID: &str = "concat.adjust";
 
+fn parse_audio_chain_key_name(name: &str) -> Option<(usize, &str)> {
+    let name = name.strip_prefix("audio-fx|")?;
+    let (entry, key) = name.split_once('|')?;
+    Some((entry.parse().ok()?, key))
+}
+
 /// The kinds the colour panel grades: a picture, and a layer, which grades
 /// everything beneath it - an adjustment layer is a layer whose chain
 /// starts with the panel's own package.
@@ -1869,7 +1875,7 @@ fn chain_colours(chain: &[AppliedFilter]) -> Vec<ColourKnobData> {
 /// knob its package declares, holding the document's value or the default.
 /// A link no package answers to keeps its row - so it can be removed - and
 /// gets no knobs.
-fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedParamData>) {
+fn chain_rows(chain: &[AppliedFilter], at: Option<f64>, audio: bool) -> (Vec<AppliedEntryData>, Vec<AppliedParamData>) {
     let catalogue = Catalogue::builtin();
     let mut rows = Vec::new();
     let mut knobs = Vec::new();
@@ -1941,17 +1947,17 @@ fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedPar
                 max: param.max as f32,
                 step: step as f32,
                 default_value: param.default as f32,
-                value: entry
-                    .params
-                    .get(&param.key)
-                    .copied()
-                    .unwrap_or(param.default) as f32,
+                value: at.filter(|_| audio && entry.is_keyed(&param.key))
+                    .map_or_else(
+                        || entry.params.get(&param.key).copied().unwrap_or(param.default),
+                        |at| entry.value_at(&param.key, at, param.default),
+                    ) as f32,
                 fmt: format_of(&param.unit),
-                keyable: false,
-                keyed: false,
-                here: false,
-                prev: false,
-                next: false,
+                keyable: audio && param.animate,
+                keyed: audio && param.animate && entry.is_keyed(&param.key),
+                here: audio && param.animate && at.is_some_and(|at| entry.key_at(&param.key, at).is_some()),
+                prev: audio && param.animate && at.is_some_and(|at| entry.keys_around(&param.key, at).0.is_some()),
+                next: audio && param.animate && at.is_some_and(|at| entry.keys_around(&param.key, at).1.is_some()),
             });
         }
     }
@@ -4794,6 +4800,9 @@ impl Studio {
         let Some(id) = self.sole_selection() else {
             return;
         };
+        let key_at = audio
+            .then(|| self.key_point().map(|(_, at)| at))
+            .flatten();
         self.begin_echo();
         let Some(clip) = self.echo_clip_mut(&id) else {
             return;
@@ -4804,7 +4813,12 @@ impl Studio {
             &mut clip.video_effects
         };
         if let Some(entry) = usize::try_from(index).ok().and_then(|i| chain.get_mut(i)) {
-            entry.params.insert(key.to_owned(), f64::from(value));
+            if let Some(at) = key_at.filter(|at| entry.is_keyed(key)) {
+                let ease = ease_before(entry.keys_on(key), at);
+                entry.set_key(key, at, f64::from(value), ease);
+            } else {
+                entry.params.insert(key.to_owned(), f64::from(value));
+            }
         }
     }
 
@@ -5012,12 +5026,55 @@ impl Studio {
         Some((clip.clone(), at, entry))
     }
 
-    /// Puts a key on one Adjust knob at the playhead, or takes off the one
+    /// Toggle a key on an animatable audio-chain parameter at the playhead.
+    fn toggle_audio_effect_key(&mut self, entry: usize, key: &str) {
+        let Some((clip, at)) = self.key_point().map(|(clip, at)| (clip.clone(), at)) else {
+            return;
+        };
+        let Some(link) = clip.filters.get(entry) else { return };
+        let Some(param) = Catalogue::builtin()
+            .get(&link.id)
+            .and_then(|package| package.manifest.params.iter().find(|param| param.key == key && param.animate))
+        else { return };
+        let command = if link.key_at(key, at).is_some() {
+            Command::ClearAudioEffectKey { clip_id: clip.id, entry, key: key.to_owned(), at }
+        } else {
+            Command::SetAudioEffectKey {
+                clip_id: clip.id,
+                entry,
+                key: key.to_owned(),
+                at,
+                value: link.value_at(key, at, param.default),
+                ease: ease_before(link.keys_on(key), at),
+            }
+        };
+        self.apply(command);
+    }
+
+    fn clear_audio_effect_keys(&mut self, entry: usize, key: &str) {
+        let Some(clip) = self.sole_selection().and_then(|id| self.clip(&id)) else { return };
+        if clip.filters.get(entry).is_some_and(|link| link.is_keyed(key)) {
+            self.apply(Command::ClearAudioEffectKeys { clip_id: clip.id.clone(), entry, key: key.to_owned() });
+        }
+    }
+
+    fn step_audio_effect_key(&mut self, entry: usize, key: &str, delta: i32) {
+        let Some((clip, at)) = self.key_point().map(|(clip, at)| (clip.clone(), at)) else { return };
+        let Some((prev, next)) = clip.filters.get(entry).map(|link| link.keys_around(key, at)) else { return };
+        let Some(target) = (if delta < 0 { prev } else { next }) else { return };
+        self.seek((clip.start + target * clip.duration) as f32);
+    }
+
+    /// Puts a key on a named parameter at the playhead, or takes off the one
     /// there. Like `toggle_key`, the new key holds what the knob is worth
     /// at that instant, so pressing the diamond never moves the picture. A
     /// wheel - named by itself or by one of its own keys - is one knob: its
     /// puck and master are keyed, and unkeyed, together.
     pub fn toggle_adjust_key(&mut self, key: &str) {
+        if let Some((entry, parameter)) = parse_audio_chain_key_name(key) {
+            self.toggle_audio_effect_key(entry, parameter);
+            return;
+        }
         let Some((clip, at, entry)) = self.adjust_point() else {
             return;
         };
@@ -5081,9 +5138,13 @@ impl Studio {
         self.apply(command);
     }
 
-    /// Takes every key off one Adjust knob - a wheel's puck and master
+    /// Takes every key off one named parameter, leaving its constant value.
     /// together - leaving it the value it holds.
     pub fn clear_adjust_keys(&mut self, key: &str) {
+        if let Some((entry, parameter)) = parse_audio_chain_key_name(key) {
+            self.clear_audio_effect_keys(entry, parameter);
+            return;
+        }
         let Some((clip, _, Some(entry))) = self.adjust_point() else {
             return;
         };
@@ -5108,8 +5169,12 @@ impl Studio {
         }
     }
 
-    /// Moves the playhead to an Adjust knob's previous (-1) or next (+1) key.
+    /// Moves the playhead to a named parameter's previous or next key.
     pub fn step_adjust_key(&mut self, key: &str, delta: i32) {
+        if let Some((entry, parameter)) = parse_audio_chain_key_name(key) {
+            self.step_audio_effect_key(entry, parameter, delta);
+            return;
+        }
         let Some((clip, at, Some(entry))) = self.adjust_point() else {
             return;
         };
@@ -9808,8 +9873,9 @@ impl Studio {
         let (visual, visual_params, sound, sound_params) =
             match self.sole_selection().and_then(|id| self.clip(&id)) {
                 Some(clip) => {
-                    let (visual, visual_params) = chain_rows(&clip.video_effects);
-                    let (sound, sound_params) = chain_rows(&clip.filters);
+                    let at = self.key_point().map(|(_, at)| at);
+                    let (visual, visual_params) = chain_rows(&clip.video_effects, at, false);
+                    let (sound, sound_params) = chain_rows(&clip.filters, at, true);
                     (visual, visual_params, sound, sound_params)
                 }
                 None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
@@ -10498,7 +10564,7 @@ impl Studio {
     }
 
     /// The selected clip's keys as instants on the timeline, every property
-    /// and Adjust knob together, one diamond per instant: what the ruler
+    /// and effect knob together, one diamond per instant: what the ruler
     /// draws while exactly one clip is selected (#188).
     pub fn key_marks(&self) -> Vec<f32> {
         let Some(clip) = self.sole_selection().and_then(|id| self.clip(&id)) else {
@@ -10508,13 +10574,8 @@ impl Studio {
             .iter()
             .flat_map(|&property| clip.keys_on(property).map(|key| key.at))
             .collect();
-        if let Some(link) = clip
-            .video_effects
-            .iter()
-            .find(|entry| entry.id == ADJUST_ID)
-        {
-            ats.extend(link.keys.values().flatten().map(|key| key.at));
-        }
+        ats.extend(clip.video_effects.iter().flat_map(|link| link.keys.values().flatten().map(|key| key.at)));
+        ats.extend(clip.filters.iter().flat_map(|link| link.keys.values().flatten().map(|key| key.at)));
         ats.sort_by(f64::total_cmp);
         ats.dedup_by(|a, b| (*a - *b).abs() <= model::KEY_EPSILON);
         ats.iter()
@@ -13435,7 +13496,7 @@ mod tests {
     fn a_colour_knob_is_a_swatch() {
         use concat_project::model::AppliedFilter;
         let mut link = AppliedFilter::new("concat.chroma-key");
-        let (_, knobs) = chain_rows(std::slice::from_ref(&link));
+        let (_, knobs) = chain_rows(std::slice::from_ref(&link), None, false);
         assert!(knobs.iter().all(|knob| knob.key != "color"), "no slider");
         assert!(knobs.iter().any(|knob| knob.key == "similarity"));
         let colours = chain_colours(std::slice::from_ref(&link));

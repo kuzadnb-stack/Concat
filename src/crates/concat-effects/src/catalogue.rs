@@ -1231,6 +1231,29 @@ impl Catalogue {
         self.compose(&[Kind::Audio], filters)
     }
 
+    /// The audio chain evaluated at one normalized instant on its clip.
+    /// Static parameters remain unchanged; keyed parameters use their track.
+    pub fn audio_chain_at(&self, filters: &[AppliedFilter], at: f64) -> String {
+        let evaluated: Vec<AppliedFilter> = filters
+            .iter()
+            .map(|filter| {
+                let mut evaluated = filter.clone();
+                if let Some(package) = self.get(&filter.id) {
+                    for param in package.manifest.params.iter().filter(|param| param.animate) {
+                        if filter.is_keyed(&param.key) {
+                            evaluated.params.insert(
+                                param.key.clone(),
+                                filter.value_at(&param.key, at, param.default),
+                            );
+                        }
+                    }
+                }
+                evaluated
+            })
+            .collect();
+        self.audio_chain(&evaluated)
+    }
+
     /// Enabled entries of these `kinds` in applied order, comma-joined. Bypassed
     /// entries, unknown ids, packages of another kind and packages without
     /// an FFmpeg backend contribute nothing. The index each fragment is

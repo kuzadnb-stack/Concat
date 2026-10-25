@@ -16,6 +16,7 @@ max = 90
 default = 55
 step = 1
 unit = "%"
+animate = true
 
 [[param]]
 key = "mix"
@@ -25,6 +26,7 @@ max = 100
 default = 22
 step = 1
 unit = "%"
+animate = true
 
 [[param]]
 key = "predelay"
@@ -34,6 +36,7 @@ max = 80
 default = 24
 step = 1
 unit = "ms"
+animate = true
 
 [ffmpeg]
 let = [

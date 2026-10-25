@@ -87,6 +87,7 @@ pub fn flatten_timeline_in(
                     fade_in: clip.fade_in,
                     fade_out: clip.fade_out,
                     filter_chain: audio_filter_chain(&clip.filters),
+                    audio_effects: clip.filters.clone(),
                     opacity: clip.opacity,
                     has_audio: Some(false),
                     ..ExportClip::blank(ClipKind::SoundLayer, clip.start, clip.duration, index)
@@ -117,6 +118,7 @@ pub fn flatten_timeline_in(
                 fade_in: clip.fade_in,
                 fade_out: clip.fade_out,
                 filter_chain: audio_filter_chain(&clip.filters),
+                audio_effects: clip.filters.clone(),
                 speed: clip.speed,
                 preserve_pitch: clip.preserve_pitch,
                 speed_curve: clip

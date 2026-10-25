@@ -190,6 +190,7 @@ export component ConfigPane inherits Rectangle {
     callback chain-set-param(audio: bool, index: int, key: string, value: float);
 
     callback clip-set(field: ClipField, value: float);
+    callback slow-zoom(zoom-in: bool);
     callback clip-set-text(field: ClipTextField, value: string);
     callback clip-set-colour(field: ClipTextField, value: color);
     callback clip-commit();
@@ -691,6 +692,7 @@ export component ConfigPane inherits Rectangle {
                 if root.showing == "Basic": VerticalLayout {
                     VideoPanel {
                         selected: root.selected;
+                        slow-zoom(zoom-in) => { root.slow-zoom(zoom-in); }
                         applied: root.applied-visual;
                         params: root.visual-params;
                         colours: root.visual-colours;

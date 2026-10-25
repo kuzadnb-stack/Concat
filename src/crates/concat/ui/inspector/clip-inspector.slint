@@ -1185,6 +1185,7 @@ export component VideoPanel inherits VerticalLayout {
     in property <bool> mask-section: true;
 
     callback set(field: ClipField, value: float);
+    callback slow-zoom(zoom-in: bool);
     /// A control gesture finished: the accumulated change becomes one command.
     callback commit();
     callback chain-add(id: string);
@@ -1337,6 +1338,20 @@ export component VideoPanel inherits VerticalLayout {
                 unit: "%";
                 unit-scale: 100;
                 changed(v) => { root.set(ClipField.scale, v); root.commit(); }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Button {
+                    label: I18n.t("common.zoomIn") + " · 12%";
+                    glyph: Glyph.chevron-up;
+                    clicked => { root.slow-zoom(true); }
+                }
+                Button {
+                    label: I18n.t("common.zoomOut") + " · 12%";
+                    glyph: Glyph.chevron-down;
+                    clicked => { root.slow-zoom(false); }
+                }
             }
 
             Param {

@@ -494,6 +494,9 @@ struct Shared {
     origin_micros: AtomicI64,
     epoch: std::time::Instant,
     playing: AtomicBool,
+    /// The output device is unavailable: follow monotonic time until it
+    /// returns, so video preview and transport do not freeze.
+    clock_fallback: AtomicBool,
     /// Silent while set: the clock runs on, the speakers say nothing. A
     /// voiceover takes the picture without the timeline's sound, so the
     /// speakers do not bleed into the microphone.

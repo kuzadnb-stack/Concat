@@ -11037,7 +11037,7 @@ impl Studio {
                 });
             }
             commands.push(Command::SetClipKey {
-                clip_id: clip.id,
+                clip_id: clip.id.clone(),
                 property: model::KeyProperty::Opacity,
                 at,
                 value,

@@ -865,6 +865,9 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
     editor.on_media_remove(on_window!(|state, row: i32| {
         state.handle(Msg::Media(MediaMsg::Remove(row)));
     }));
+    editor.on_media_add_selected_as_takes(on_window!(|state| {
+        state.handle(Msg::Media(MediaMsg::AddSelectedAsTakes));
+    }));
     editor.on_media_remove_selected(on_window!(|state| {
         state.handle(Msg::Media(MediaMsg::RemoveSelected));
     }));
@@ -1028,6 +1031,12 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
     }));
     editor.on_snap_changed(on_window!(|state, snap: bool| {
         state.handle(Msg::Timeline(TimelineMsg::SnapChanged(snap)));
+    }));
+    editor.on_musical_snap_changed(on_window!(|state, mode: i32| {
+        state.set_musical_snap(mode);
+    }));
+    editor.on_beat_bpm_changed(on_window!(|state, bpm: f32| {
+        state.set_beat_bpm(bpm);
     }));
     editor.on_magnetic_changed(on_window!(|state, on: bool| {
         state.handle(Msg::Timeline(TimelineMsg::MagneticChanged(on)));
@@ -1322,6 +1331,21 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
 
     editor.on_clip_set(on_lanes!(|state, field: ClipField, value: f32| {
         state.clip_set(field, value);
+    }));
+    editor.on_slow_zoom(on_lanes!(|state, zoom_in: bool| {
+        state.slow_zoom(zoom_in);
+    }));
+    editor.on_sync_selected_clips(on_lanes!(|state| {
+        state.sync_selected_clips();
+    }));
+    editor.on_set_audio_master(on_lanes!(|state| {
+        state.set_audio_master();
+    }));
+    editor.on_cut_to_performance_angle(on_lanes!(|state| {
+        state.cut_to_performance_angle();
+    }));
+    editor.on_nudge_selection(on_lanes!(|state, frames: i32| {
+        state.nudge_selection_frames(frames);
     }));
     editor.on_clip_set_text(on_lanes!(
         |state, field: ClipTextField, value: SharedString| {

@@ -53,6 +53,8 @@ pub enum MediaMsg {
     Imported(Vec<Result<MediaSummary, String>>),
     /// Everything selected goes on the timeline at the playhead.
     AddSelectedAtPlayhead,
+    /// Places selected video/audio files as parallel performance takes.
+    AddSelectedAsTakes,
 }
 
 /// The bin's state.
@@ -132,6 +134,10 @@ impl MediaBin {
                     .map(|item| item.id.clone())
                 {
                     self.selected.remove(&id);
+                    if studio.audio_master_media.as_deref() == Some(id.as_str()) {
+                        studio.audio_master_media = None;
+                        studio.audio_master_clip = None;
+                    }
                     studio.apply(Command::RemoveMedia { media_id: id });
                 }
             }
@@ -185,6 +191,103 @@ impl MediaBin {
                         } else {
                             tf("mediaBin.importedFiles", &[&added])
                         },
+                        false,
+                    );
+                }
+            }
+            MediaMsg::AddSelectedAsTakes => {
+                let mut items: Vec<String> = studio
+                    .project()
+                    .media
+                    .iter()
+                    .filter(|item| self.selected.contains(&item.id))
+                    .filter(|item| matches!(item.kind, model::MediaKind::Video | model::MediaKind::Audio))
+                    .map(|item| item.id.clone())
+                    .collect();
+                let videos = items
+                    .iter()
+                    .filter(|id| studio.project().media_by_id(id).is_some_and(|item| item.kind == model::MediaKind::Video))
+                    .count();
+                if videos == 0 {
+                    studio.notify("Select at least one video take.", true);
+                    return;
+                }
+                let master_media = studio
+                    .audio_master_media
+                    .clone()
+                    .filter(|id| studio.project().media_by_id(id).is_some_and(|item| item.has_audio));
+                if let Some(master) = &master_media
+                    && !items.contains(master)
+                {
+                    items.insert(0, master.clone());
+                }
+                let start = f64::from(studio.playhead.max(0.0));
+                let max_duration = items
+                    .iter()
+                    .map(|id| {
+                        studio.project().media_by_id(id)
+                            .and_then(|item| item.duration)
+                            .unwrap_or(5.0)
+                    })
+                    .fold(0.0_f64, f64::max).max(f64::from(crate::studio::MIN_DURATION));
+                let timeline = studio.timeline();
+                let free_tracks = timeline
+                    .tracks
+                    .iter()
+                    .filter(|track| timeline.is_free(&track.id, start, max_duration, &[]))
+                    .count();
+                let extra_tracks = items.len().saturating_sub(free_tracks);
+                let mut commands = Vec::with_capacity(extra_tracks + items.len());
+                commands.extend((0..extra_tracks).map(|_| Command::AddTrack { bottom: false }));
+                commands.extend(items.iter().map(|media_id| Command::AddClipAtFirstFree {
+                    media_id: media_id.clone(),
+                    start,
+                }));
+                let before: HashSet<String> = studio.timeline().clips.iter().map(|clip| clip.id.clone()).collect();
+                studio.close_source();
+                studio.apply(Command::Batch { commands });
+                let created: Vec<(String, String)> = studio
+                    .timeline()
+                    .clips
+                    .iter()
+                    .filter(|clip| !before.contains(&clip.id) && items.contains(&clip.media_id))
+                    .map(|clip| (clip.id.clone(), clip.media_id.clone()))
+                    .collect();
+                studio.selection = created.iter().map(|(clip_id, _)| clip_id.clone()).collect();
+                let video_clips: Vec<(String, String)> = created
+                    .iter()
+                    .filter_map(|(clip_id, _)| {
+                        studio.clip(clip_id)
+                            .filter(|clip| clip.kind == model::ClipKind::Video)
+                            .map(|clip| (clip.id.clone(), clip.track_id.clone()))
+                    })
+                    .collect();
+                studio.performance_tracks = video_clips
+                    .iter()
+                    .map(|(_, track_id)| track_id.clone())
+                    .collect();
+                studio.performance_tracks.dedup();
+                if let Some((_, default_track)) = video_clips.first() {
+                    let camera_keys = video_clips
+                        .iter()
+                        .map(|(clip_id, track_id)| Command::SetClipKey {
+                            clip_id: clip_id.clone(),
+                            property: model::KeyProperty::Opacity,
+                            at: 0.0,
+                            value: if track_id == default_track { 1.0 } else { 0.0 },
+                            ease: model::KeyEase::LINEAR,
+                        })
+                        .collect();
+                    studio.apply(Command::Batch { commands: camera_keys });
+                }
+                if let Some(master_media) = master_media
+                    && let Some((clip_id, _)) = created.iter().find(|(_, media_id)| media_id == &master_media)
+                {
+                    studio.audio_master_clip = Some(clip_id.clone());
+                    studio.sync_selected_clips();
+                } else {
+                    studio.notify(
+                        "Takes added on separate lanes. Set an audio master, then sync the selected takes.",
                         false,
                     );
                 }

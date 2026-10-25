@@ -380,6 +380,25 @@ export component TimelineTray inherits Rectangle {
             checked: root.snap;
             clicked => { root.snap-changed(!root.snap); }
         }
+        TrayButton {
+            glyph: Glyph.waveform;
+            label: Editor.musical-snap == 1 ? "Beat snap" : Editor.musical-snap == 2 ? "Bar snap" : "Musical snap off";
+            icon-size: 16px;
+            checked: Editor.musical-snap != 0;
+            clicked => { Editor.musical-snap-changed(Math.mod(Editor.musical-snap + 1, 3)); }
+        }
+        TrayButton {
+            glyph: Glyph.minus;
+            label: "BPM - " + Math.round(Editor.beat-bpm);
+            icon-size: 16px;
+            clicked => { Editor.beat-bpm-changed(Math.max(30, Editor.beat-bpm - 1)); }
+        }
+        TrayButton {
+            glyph: Glyph.plus;
+            label: "BPM + " + Math.round(Editor.beat-bpm);
+            icon-size: 16px;
+            clicked => { Editor.beat-bpm-changed(Math.min(300, Editor.beat-bpm + 1)); }
+        }
         // The magnetic timeline, beside the snap it is so often mistaken
         // for: snap is where a drag lands, magnetic is that a delete or a
         // trim leaves no hole. https://github.com/jub0t/Concat/issues/106

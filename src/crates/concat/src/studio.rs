@@ -2366,16 +2366,21 @@ fn sync_envelope(
 
 /// Finds the relative offset between two RMS envelopes. Positive lag means
 /// the target's matching sound occurs later in its recording.
-fn sync_lag(reference: &[f32], target: &[f32]) -> Option<(isize, f32)> {
-    let min_overlap = 250usize; // five seconds at 50 Hz
+fn sync_lag(
+    reference: &[f32],
+    target: &[f32],
+    expected_lag: isize,
+) -> Option<(isize, f32)> {
+    let min_overlap = 100usize; // two seconds at 50 Hz
     if reference.len() < min_overlap || target.len() < min_overlap {
         return None;
     }
     let limit = 2_000isize
         .min(reference.len() as isize - min_overlap as isize)
         .min(target.len() as isize - min_overlap as isize);
+    let expected_lag = expected_lag.clamp(-limit, limit);
     let mut best = (0isize, f32::NEG_INFINITY);
-    let mut runner_up = f32::NEG_INFINITY;
+    let mut candidates = Vec::new();
     for lag in -limit..=limit {
         let from_ref = (-lag).max(0) as usize;
         let from_target = lag.max(0) as usize;
@@ -2389,10 +2394,7 @@ fn sync_lag(reference: &[f32], target: &[f32]) -> Option<(isize, f32)> {
                 b + f64::from(target[from_target + index]),
             )
         });
-        let (mean_ref, mean_target) = (
-            sum_ref / count as f64,
-            sum_target / count as f64,
-        );
+        let (mean_ref, mean_target) = (sum_ref / count as f64, sum_target / count as f64);
         let (mut dot, mut var_ref, mut var_target) = (0.0f64, 0.0f64, 0.0f64);
         for index in 0..count {
             let a = f64::from(reference[from_ref + index]) - mean_ref;
@@ -2401,18 +2403,24 @@ fn sync_lag(reference: &[f32], target: &[f32]) -> Option<(isize, f32)> {
             var_ref += a * a;
             var_target += b * b;
         }
-        if var_ref < 1.0 || var_target < 1.0 { continue; }
+        if var_ref < 1.0 || var_target < 1.0 {
+            continue;
+        }
         let score = (dot / (var_ref * var_target).sqrt()) as f32;
+        candidates.push((lag, score));
         if score > best.1 {
-            if (lag - best.0).abs() > 10 { runner_up = runner_up.max(best.1); }
             best = (lag, score);
-        } else if (lag - best.0).abs() > 10 {
-            runner_up = runner_up.max(score);
         }
     }
-    (best.1 >= 0.28 && best.1 - runner_up >= 0.012).then_some(best)
+    // Repeated riffs can yield several nearly equal peaks. When tied, prefer
+    // the lag that moves the clips least from their current timeline positions.
+    let chosen = candidates
+        .into_iter()
+        .filter(|(_, score)| *score >= best.1 - 0.02)
+        .min_by_key(|(lag, _)| lag.abs_diff(expected_lag))
+        .unwrap_or(best);
+    (chosen.1 >= 0.28).then_some(chosen)
 }
-
 impl Studio {
     /// A window with nothing open: the launch screen, with the recents list
     /// read off disk.
@@ -10894,7 +10902,8 @@ impl Studio {
                         continue;
                     }
                 };
-                let Some((lag, _score)) = sync_lag(&reference, &envelope) else {
+                let expected_lag = ((reference_start - target.5) * 50.0).round() as isize;
+                let Some((lag, _score)) = sync_lag(&reference, &envelope, expected_lag) else {
                     failed += 1;
                     continue;
                 };
@@ -10922,7 +10931,7 @@ impl Studio {
             Ok((moves, muted_cameras, matched, failed, master_id, master_was_muted)) => {
                 if matched == 0 {
                     studio.notify(
-                        "No reliable matches found. Try longer takes with clearer shared audio.",
+                        "No clear audio match found. Use clips with at least two seconds of shared sound.",
                         true,
                     );
                     return;

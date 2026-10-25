@@ -11006,7 +11006,7 @@ impl Studio {
             self.notify("Move the playhead inside the selected camera take first.", true);
             return;
         }
-        let active: Vec<Clip> = self
+        let active: Vec<_> = self
             .performance_tracks
             .iter()
             .filter_map(|track_id| {

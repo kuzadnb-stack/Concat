@@ -118,6 +118,7 @@ export component Seat inherits Rectangle {
                     from-row, to-row, additive);
             }
             remove(id) => { Editor.media-remove(id); }
+            add-selected-as-takes => { Editor.media-add-selected-as-takes(); }
             remove-selected => { Editor.media-remove-selected(); }
             activate(id) => { Editor.media-activate(id); }
             context(id) => { Editor.media-context(id); }
@@ -300,6 +301,7 @@ export component Seat inherits Rectangle {
             transition-knobs: Editor.transition-knobs;
             transition-choices: Editor.transition-choices;
             clip-set(field, value) => { Editor.clip-set(field, value); }
+            slow-zoom(zoom-in) => { Editor.slow-zoom(zoom-in); }
             clip-set-text(field, value) => { Editor.clip-set-text(field, value); }
             clip-set-colour(field, value) => { Editor.clip-set-colour(field, value); }
             clip-commit => { Editor.clip-commit(); }

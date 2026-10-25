@@ -508,6 +508,40 @@ mod links {
     }
 }
 
+/// Opens a just-exported video in one of the phone's media apps.
+#[cfg(target_os = "android")]
+mod export_video {
+    use jni::objects::JString;
+    use jni::{jni_sig, jni_str};
+    use slint::android::AndroidApp;
+
+    pub fn install(app: &AndroidApp) {
+        let app = app.clone();
+        concat::install_export_video_viewer(Box::new(move |path| {
+            let answer = super::java::with_class(&app, |env, activity, class| {
+                let path = env.new_string(path)?;
+                let answer = env.call_static_method(
+                    class,
+                    jni_str!("openVideo"),
+                    jni_sig!("(Landroid/app/Activity;Ljava/lang/String;)Ljava/lang/String;"),
+                    &[activity.into(), (&path).into()],
+                )?.l()?;
+                if answer.is_null() {
+                    Ok(None)
+                } else {
+                    let answer = env.cast_local::<JString>(answer)?;
+                    Ok(Some(answer.mutf8_chars(env)?.to_string()))
+                }
+            });
+            match answer {
+                Ok(None) => Ok(()),
+                Ok(Some(why)) => Err(why),
+                Err(error) => Err(format!("could not open the video: {error}")),
+            }
+        }));
+    }
+}
+
 /// Called by the activity's native glue; the name is the contract.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
@@ -525,6 +559,7 @@ fn android_main(app: slint::android::AndroidApp) {
     publisher::install(&app);
     microphone::install(&app);
     links::install(&app);
+    export_video::install(&app);
     if let Err(error) = concat::run() {
         log::error!("{error}");
     }

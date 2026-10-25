@@ -159,14 +159,26 @@ impl MonitorPane {
                     // loop, the one thread the window's renderer submits
                     // from, and a second thread submitting beside it hangs
                     // the GPU - see `Monitor::texture_of`.
-                    Ok(Picture::Sources(sources)) => studio
-                        .host
-                        .monitor
-                        .texture_of(&sources, spec)
-                        .and_then(|texture| {
-                            slint::Image::try_from(texture)
-                                .map_err(|error| format!("preview texture: {error}"))
-                        }),
+                    Ok(Picture::Sources(sources)) => {
+                        let image = studio
+                            .host
+                            .monitor
+                            .texture_of(&sources, spec)
+                            .and_then(|texture| {
+                                slint::Image::try_from(texture)
+                                    .map_err(|error| format!("preview texture: {error}"))
+                            });
+                        if image.is_err() && cfg!(target_os = "android") {
+                            // Android GPU/texture support varies by device and can
+                            // fail only once playback or a caption layer is present.
+                            // Re-render this frame through the CPU path before
+                            // reporting a blank preview to the person.
+                            if self.request_software_fallback(studio, spec) {
+                                return;
+                            }
+                        }
+                        image
+                    }
                     Ok(Picture::Pixels(bytes, width, height)) => {
                         let buffer =
                             slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
@@ -219,6 +231,30 @@ impl MonitorPane {
         };
         let side = |px: u32| ((f64::from(px) * scale).round() as u32).max(2) & !1;
         (side(width), side(height))
+    }
+
+    /// A GPU preview failure gets one software-composited attempt on Android.
+    /// Video is decoded and composited by the same preview engine; only the
+    /// final frame path changes, so captions and effects remain in the image.
+    fn request_software_fallback(&mut self, studio: &mut Studio, spec: FrameSpec) -> bool {
+        let Some((clips, settings)) = studio.preview_clips() else {
+            return false;
+        };
+        let monitor = studio.host.monitor.clone();
+        let (width, height) = (spec.width, spec.height);
+        self.busy = true;
+        self.asked = Some(std::time::Instant::now());
+        spawn_frame(
+            move || {
+                monitor
+                    .frame(clips, &settings, spec)
+                    .map(|bytes| Picture::Pixels(bytes, width, height))
+            },
+            move |studio, _, _, result| {
+                studio.handle(Msg::Monitor(MonitorMsg::Frame(result, spec)));
+            },
+        );
+        true
     }
 
     /// Asks the engine for the frame at the playhead - or under the pointer,

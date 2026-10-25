@@ -4252,6 +4252,50 @@ impl Studio {
         }
     }
 
+    /// Adds a transparent countdown overlay above the selected visual take.
+    /// Each second is a one-second title so the timer works in both the live
+    /// preview and the normal flattened export path without a separate player.
+    pub fn add_progress_overlay(&mut self) {
+        self.flush_commit();
+        let picked = self
+            .sole_selection()
+            .and_then(|id| self.clip(&id).cloned())
+            .filter(|clip| matches!(clip.kind, model::ClipKind::Video | model::ClipKind::Image));
+        let (start, span) = picked
+            .map(|clip| (clip.start, clip.duration))
+            .unwrap_or_else(|| {
+                let remaining = (f64::from(self.duration()) - f64::from(self.playhead)).max(1.0);
+                (f64::from(self.playhead.max(0.0)), remaining.min(10.0))
+            });
+        let seconds = span.ceil().clamp(1.0, 30.0) as u32;
+        let mut commands = Vec::with_capacity(seconds as usize);
+        for index in 0..seconds {
+            let remaining = seconds - index;
+            let style = model::TextStyle {
+                content: format!("{:02}:{:02}", remaining / 60, remaining % 60),
+                font_size: 0.12,
+                stroke_width: 0.012,
+                stroke_color: "#000000".to_owned(),
+                shadow: true,
+                // The title itself is the overlay; there is no opaque card
+                // behind it, so the take remains visible through the timer.
+                background: String::new(),
+                ..Default::default()
+            };
+            commands.push(Command::AddTextClip {
+                track_id: None,
+                start: start + f64::from(index),
+                style: Some(style),
+                duration: Some((span - f64::from(index)).clamp(0.01, 1.0)),
+                offset_y: Some(-0.28),
+                above: true,
+            });
+        }
+        if let Some(id) = self.apply(Command::Batch { commands }) {
+            self.selection = vec![id];
+            self.notify("Added a transparent countdown timer. Select a take to set its length.", false);
+        }
+    }
     /// A shape from the Stickers page, placed the way a title is: over
     /// the picture, on the first free lane above it.
     fn add_shape(
@@ -10893,6 +10937,7 @@ impl Studio {
             let mut moves = Vec::new();
             let mut muted_cameras = Vec::new();
             let mut matched = 0usize;
+            let mut confidence_total = 0.0f32;
             let mut failed = 0usize;
             for target in targets {
                 let envelope = match sync_envelope(&target.1, target.2, target.3, target.4) {
@@ -10903,7 +10948,7 @@ impl Studio {
                     }
                 };
                 let expected_lag = ((reference_start - target.5) * 50.0).round() as isize;
-                let Some((lag, _score)) = sync_lag(&reference, &envelope, expected_lag) else {
+                let Some((lag, score)) = sync_lag(&reference, &envelope, expected_lag) else {
                     failed += 1;
                     continue;
                 };
@@ -10913,6 +10958,7 @@ impl Studio {
                     continue;
                 }
                 matched += 1;
+                confidence_total += score;
                 if (start - target.5).abs() > 0.005 {
                     moves.push(ClipMove {
                         clip_id: target.0.clone(),
@@ -10924,11 +10970,24 @@ impl Studio {
                     muted_cameras.push(target.0);
                 }
             }
-            Ok::<_, String>((moves, muted_cameras, matched, failed, master_id_for_edit, master_was_muted))
+            let confidence = if matched == 0 {
+                0
+            } else {
+                (confidence_total / matched as f32 * 100.0).round() as u32
+            };
+            Ok::<_, String>((
+                moves,
+                muted_cameras,
+                matched,
+                failed,
+                confidence,
+                master_id_for_edit,
+                master_was_muted,
+            ))
         };
         spawn_in_project(work, move |studio, _, _, result| match result {
             Err(error) => studio.notify(&error, true),
-            Ok((moves, muted_cameras, matched, failed, master_id, master_was_muted)) => {
+            Ok((moves, muted_cameras, matched, failed, confidence, master_id, master_was_muted)) => {
                 if matched == 0 {
                     studio.notify(
                         "No clear audio match found. Use clips with at least two seconds of shared sound.",
@@ -10954,9 +11013,13 @@ impl Studio {
                     studio.apply(Command::Batch { commands });
                 }
                 let message = if failed > 0 {
-                    format!("Synced {matched} take(s); {failed} had no clear match.")
+                    format!(
+                        "Synced {matched} take(s) at {confidence}% average match confidence; {failed} had no clear match."
+                    )
                 } else {
-                    format!("Synced {matched} take(s) and kept the master audio continuous.")
+                    format!(
+                        "Synced {matched} take(s) at {confidence}% average match confidence and kept the master audio continuous."
+                    )
                 };
                 studio.notify(&message, failed > 0);
             }

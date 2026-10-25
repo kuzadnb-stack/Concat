@@ -1031,6 +1031,16 @@ export component PhoneEditor inherits Rectangle {
                 label: I18n.t("phone.split");
                 clicked => { Editor.shortcut("split-selected"); }
             }
+            if root.is-picture: ToolItem {
+                glyph: Glyph.plus;
+                label: I18n.t("phone.slowZoomIn");
+                clicked => { Editor.slow-zoom(true); }
+            }
+            if root.is-picture: ToolItem {
+                glyph: Glyph.minus;
+                label: I18n.t("phone.slowZoomOut");
+                clicked => { Editor.slow-zoom(false); }
+            }
             if Editor.performance-mode: ToolItem {
                 glyph: Glyph.film;
                 label: "Cut to angle";
@@ -1288,6 +1298,14 @@ export component PhoneEditor inherits Rectangle {
                 label: I18n.t("phone.addATitle");
                 clicked => {
                     Editor.library-add-text("default");
+                    root.hide();
+                }
+            }
+            SheetButton {
+                glyph: Glyph.clock;
+                label: I18n.t("phone.progressTimer");
+                clicked => {
+                    Editor.library-add-progress-overlay();
                     root.hide();
                 }
             }

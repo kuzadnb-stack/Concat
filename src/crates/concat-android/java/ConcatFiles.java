@@ -89,6 +89,46 @@ public class ConcatFiles extends Fragment {
                 MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY));
     }
 
+    /** Opens a published Movies/Concat video in an installed video app. */
+    public static String openVideo(Activity activity, String publishedPath) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return "opening published videos requires Android 10 or later";
+        }
+        int slash = publishedPath.lastIndexOf('/');
+        if (slash <= 0 || slash == publishedPath.length() - 1) {
+            return "the exported video path is invalid";
+        }
+        String folder = publishedPath.substring(0, slash);
+        String name = publishedPath.substring(slash + 1);
+        Uri collection = MediaStore.Video.Media.getContentUri(
+                MediaStore.VOLUME_EXTERNAL_PRIMARY);
+        Uri uri = null;
+        try (Cursor cursor = activity.getContentResolver().query(
+                collection, new String[] {MediaStore.MediaColumns._ID},
+                MediaStore.MediaColumns.RELATIVE_PATH + "=? AND "
+                        + MediaStore.MediaColumns.DISPLAY_NAME + "=?",
+                new String[] {folder + "/", name}, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                long id = cursor.getLong(0);
+                uri = Uri.withAppendedPath(collection, Long.toString(id));
+            }
+        } catch (Exception e) {
+            return "could not find the exported video: " + e.getMessage();
+        }
+        if (uri == null) {
+            return "the exported video is not visible in the phone's media library yet";
+        }
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, "video/mp4");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            activity.startActivity(Intent.createChooser(intent, "Open video"));
+            return null;
+        } catch (Exception e) {
+            return "no video app could open this file: " + e.getMessage();
+        }
+    }
+
     /**
      * {@link #publishVideo} for a small file that is not a video - a
      * subtitle file - of MIME type {@code mime}: moved into the phone's

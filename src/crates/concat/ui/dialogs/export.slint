@@ -80,6 +80,8 @@ export struct ExportData {
     done-size: string,
     /// nothing on the timeline to export
     empty: bool,
+    /// The exported file can be opened directly on this device.
+    can-view: bool,
 }
 
 // One tile of the summary block.
@@ -399,6 +401,7 @@ component ExportFooter inherits VerticalLayout {
     callback begin();
     callback cancel();
     callback reveal();
+    callback view();
     callback again();
 
     property <bool> running: root.data.phase == ExportPhase.running;
@@ -497,6 +500,11 @@ component ExportFooter inherits VerticalLayout {
         spacing: 6px;
         alignment: start;
 
+        if root.data.can-view: Button {
+            label: I18n.t("export.viewVideo");
+            glyph: Glyph.play;
+            clicked => { root.view(); }
+        }
         if !root.phone: Button {
             label: I18n.t("export.showInFolder");
             glyph: Glyph.import;
@@ -570,6 +578,7 @@ export component ExportDialog inherits Rectangle {
     callback begin();
     callback cancel();
     callback reveal();
+    callback view();
     callback again();
 
     property <bool> running: root.data.phase == ExportPhase.running;
@@ -811,6 +820,7 @@ export component ExportDialog inherits Rectangle {
                     begin => { root.begin(); }
                     cancel => { root.cancel(); }
                     reveal => { root.reveal(); }
+                    view => { root.view(); }
                     again => { root.again(); }
                 }
             }

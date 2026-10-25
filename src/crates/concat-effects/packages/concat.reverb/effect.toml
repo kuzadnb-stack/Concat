@@ -1,0 +1,49 @@
+[effect]
+id = "concat.reverb"
+name = "Reverb"
+kind = "audio"
+category = "Space"
+order = 29
+intensity = "mix"
+aliases = ["reverb"]
+description = "Short, dense reflections for room and plate-style ambience."
+
+[[param]]
+key = "decay"
+label = "Decay"
+min = 10
+max = 90
+default = 55
+step = 1
+unit = "%"
+
+[[param]]
+key = "mix"
+label = "Wet"
+min = 0
+max = 100
+default = 22
+step = 1
+unit = "%"
+
+[[param]]
+key = "predelay"
+label = "Pre-delay"
+min = 5
+max = 80
+default = 24
+step = 1
+unit = "ms"
+
+[ffmpeg]
+let = [
+  "d1 = decay / 100",
+  "d2 = d1 * 0.78",
+  "d3 = d1 * 0.60",
+  "d4 = d1 * 0.44",
+  "t1 = round(predelay)",
+  "t2 = round(predelay * 2.1)",
+  "t3 = round(predelay * 3.4)",
+  "t4 = round(predelay * 5.0)",
+]
+chain = "aecho={fixed(1 - mix / 100, 2)}:{fixed(mix / 100, 2)}:{round(t1)}|{round(t2)}|{round(t3)}|{round(t4)}:{fixed(d1, 2)}|{fixed(d2, 2)}|{fixed(d3, 2)}|{fixed(d4, 2)}"

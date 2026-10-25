@@ -48,6 +48,8 @@ pub enum ExportMsg {
     FolderChosen(String),
     /// Show the finished file in the file manager.
     Reveal,
+    /// Open the finished video in the phone's video app.
+    View,
     Start,
     /// Start over a file already there: the confirmation sheet's answer.
     Overwrite,
@@ -184,6 +186,13 @@ impl ExportPane {
                     && let Err(error) = platform::reveal(&self.written)
                 {
                     studio.notify(&i18n::tf("export.couldNotShowFile", &[&error]), true);
+                }
+            }
+            ExportMsg::View => {
+                if !self.written.is_empty()
+                    && let Err(error) = platform::view_export(&self.written)
+                {
+                    studio.notify(&tf("export.couldNotShowFile", &[&error]), true);
                 }
             }
             ExportMsg::Start => self.start(studio),
@@ -652,6 +661,7 @@ impl ExportPane {
             message: self.message.as_str().into(),
             done_size: bytes(self.size_bytes(studio)).into(),
             empty: clips == 0,
+            can_view: cfg!(target_os = "android") && platform::published_folder().is_some(),
         }
     }
 }

@@ -517,6 +517,7 @@ impl Shared {
             origin_micros: AtomicI64::new(0),
             epoch: std::time::Instant::now(),
             playing: AtomicBool::new(false),
+            clock_fallback: AtomicBool::new(false),
             muted: AtomicBool::new(false),
             peak_left: AtomicU32::new(0),
             peak_right: AtomicU32::new(0),
@@ -548,6 +549,9 @@ impl Shared {
             return position;
         }
         let run_on = self.now_micros() - self.origin_micros.load(Ordering::Relaxed);
+        if self.clock_fallback.load(Ordering::Relaxed) {
+            return run_on.max(0) as f64 / 1_000_000.0;
+        }
         (run_on as f64 / 1_000_000.0).clamp(position, position + COAST.as_secs_f64())
     }
 }
@@ -1303,6 +1307,7 @@ fn supervise_stream(
                 // `_stream` drops here, releasing the device before rebuild.
             }
             Err(error) => {
+                shared.clock_fallback.store(true, Ordering::Relaxed);
                 // Once, not every retry: a machine with no sound card would
                 // otherwise toast every backoff tick forever.
                 if !reported_missing {
@@ -1394,11 +1399,14 @@ where
     // playback resumes the same clips at the shared clock's position.
     let mut clips: Vec<ActiveClip> = locked(last_active).clone();
     let mut playing = shared.playing.load(Ordering::Relaxed);
-    let mut position = shared.position();
+    // If the output device was missing, the video transport has kept moving
+    // on the monotonic clock. Resume audio at that current position.
+    let mut position = shared.position_now();
 
     let failed = Arc::new(AtomicBool::new(false));
     let rx = Arc::clone(rx);
     let shared = Arc::clone(shared);
+    let error_clock = Arc::clone(&shared);
 
     let stream = device
         .build_output_stream(
@@ -1500,13 +1508,17 @@ where
                 }
 
                 shared.stamp(position);
+                // The first callback after recovery re-establishes the audio
+                // clock, which is now advancing again from `position`.
+                shared.clock_fallback.store(false, Ordering::Relaxed);
             },
             {
                 let events = Arc::clone(events);
                 let failed = Arc::clone(&failed);
                 move |error| {
-                    // The supervisor rebuilds on this flag; the report says
-                    // why the sound hiccuped.
+                    // Keep the picture moving during the rebuild. The next
+                    // output callback switches the transport back to audio time.
+                    error_clock.clock_fallback.store(true, Ordering::Relaxed);
                     report(events.as_ref(), format!("audio stream error: {error}"));
                     failed.store(true, Ordering::Relaxed);
                 }

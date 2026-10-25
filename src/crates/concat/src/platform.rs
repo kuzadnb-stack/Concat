@@ -899,6 +899,36 @@ pub fn install_link_opener(opener: LinkOpener) {
     let _ = LINK_OPENER.set(opener);
 }
 
+/// Opens a published video in a phone's media app. Installed by Android's
+/// activity crate before the editor starts.
+#[cfg(target_os = "android")]
+pub type ExportVideoViewer = Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+#[cfg(target_os = "android")]
+static EXPORT_VIDEO_VIEWER: std::sync::OnceLock<ExportVideoViewer> = std::sync::OnceLock::new();
+
+/// Installs the Android media-app opener once, before the window runs.
+#[cfg(target_os = "android")]
+pub fn install_export_video_viewer(viewer: ExportVideoViewer) {
+    let _ = EXPORT_VIDEO_VIEWER.set(viewer);
+}
+
+/// Plays the finished export in the device's video app.
+pub fn view_export(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let viewer = EXPORT_VIDEO_VIEWER
+            .get()
+            .ok_or_else(|| "video playback is unavailable on this device".to_owned())?;
+        return viewer(path);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = path;
+        Err("opening the exported video is available on Android".to_owned())
+    }
+}
+
 /// Opens a web address in the system's browser: the launch screen's
 /// guides, the repository, the release notes. A desktop hands it to the
 /// platform's opener; Android to an ACTION_VIEW intent through the

@@ -55,7 +55,9 @@ pub use platform::{
     ExportPublisher, FilePicker, PickKinds, install_export_publisher, install_file_picker,
 };
 #[cfg(target_os = "android")]
-pub use platform::{LinkOpener, install_link_opener};
+pub use platform::{
+    ExportVideoViewer, LinkOpener, install_export_video_viewer, install_link_opener,
+};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub use platform::{MicrophoneAccess, install_microphone_access};
 mod panes;
@@ -916,6 +918,9 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
     }));
     editor.on_library_add_text(on_window!(|state, preset: SharedString| {
         state.place_at_playhead(&format!("text:{preset}:Title"));
+    }));
+    editor.on_library_add_progress_overlay(on_window!(|state| {
+        state.add_progress_overlay();
     }));
     // A figure from the Stickers page, named in the interface's language.
     editor.on_library_add_shape(on_window!(
@@ -1966,6 +1971,9 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
     }));
     app.on_export_reveal(on_window!(|state| {
         state.handle(Msg::Export(ExportMsg::Reveal));
+    }));
+    app.on_export_view(on_window!(|state| {
+        state.handle(Msg::Export(ExportMsg::View));
     }));
     app.on_export_cancel(on_window!(|state| {
         state.handle(Msg::Export(ExportMsg::Cancel));

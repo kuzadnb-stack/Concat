@@ -96,6 +96,7 @@ export global Editor {
         from-row: int, to-row: int, additive: bool);
     callback media-remove(id: int);
     callback media-remove-selected();
+    callback media-add-selected-as-takes();
     callback media-activate(id: int);
     /// Right-click on a card in the bin: Rust fills `menu-items` for the
     /// file and bumps `menu-token`, the same round trip as `clip-context`.
@@ -144,6 +145,10 @@ export global Editor {
 
     // ── the inspector ──
     in-out property <SelectedClipData> selected-clip;
+    in-out property <int> selection-count;
+    in-out property <bool> audio-master-set;
+    in-out property <bool> audio-master-selected;
+    in-out property <bool> performance-mode;
     /// The transition selected on its own; see SelectedTransitionData.
     in-out property <SelectedTransitionData> selected-transition;
     /// The selected clip's media's audio tracks, one label each, in file
@@ -153,6 +158,11 @@ export global Editor {
     /// fresh model on every publish, and every panel would re-seed for it.
     in-out property <[string]> audio-tracks;
     callback clip-set(field: ClipField, value: float);
+    callback slow-zoom(zoom-in: bool);
+    callback sync-selected-clips();
+    callback set-audio-master();
+    callback cut-to-performance-angle();
+    callback nudge-selection(frames: int);
     callback clip-set-text(field: ClipTextField, value: string);
     callback clip-set-colour(field: ClipTextField, value: color);
     callback clip-commit();
@@ -311,6 +321,8 @@ export global Editor {
     in-out property <[ClipData]> clips;
     in-out property <TimelineTool> tool;
     in-out property <bool> snap;
+    in-out property <int> musical-snap;
+    in-out property <float> beat-bpm: 120;
     /// The magnetic timeline: a delete or a trim closes the gap it would
     /// leave. A remembered preference, which Rust owns; the tray's button
     /// and the Settings switch both show it.
@@ -365,6 +377,8 @@ export global Editor {
     callback tab-added();
     callback tool-changed(tool: TimelineTool);
     callback snap-changed(snap: bool);
+    callback musical-snap-changed(mode: int);
+    callback beat-bpm-changed(value: float);
     callback magnetic-changed(on: bool);
     callback pan-changed(on: bool);
     callback trim-follow-changed(on: bool);

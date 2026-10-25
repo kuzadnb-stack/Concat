@@ -1826,6 +1826,7 @@ export component MediaPane inherits Rectangle {
         from-row: int, to-row: int, additive: bool);
     callback remove(id: int);
     callback remove-selected();
+    callback add-selected-as-takes();
     /// double-clicked: place it on the timeline at the playhead
     callback activate(id: int);
     /// right-clicked: the card's menu, filled by Rust; see MediaGrid.context
@@ -2554,6 +2555,28 @@ export component MediaPane inherits Rectangle {
                                 overflow: elide;
                             }
 
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: add-takes.width + 18px;
+                                    height: 20px;
+                                    border-radius: Theme.r-xs;
+                                    background: take.has-hover ? Theme.accent-soft : Colors.transparent;
+
+                                    add-takes := Text {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        text: "Add as takes";
+                                        color: Theme.accent;
+                                        font-size: Theme.fs-sm;
+                                    }
+
+                                    take := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.add-selected-as-takes(); }
+                                    }
+                                }
+                            }
                             VerticalLayout {
                                 alignment: center;
                                 Rectangle {

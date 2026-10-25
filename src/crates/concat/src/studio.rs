@@ -870,6 +870,17 @@ pub struct Studio {
     /// about a track that the document does not.
     pub lanes: crate::panes::timeline::TimelinePane,
     pub selection: Vec<String>,
+    /// The clip chosen as the continuous audio reference for performance
+    /// sync. It is kept as an editor choice, not a project edit.
+    pub audio_master_clip: Option<String>,
+    /// Media-bin master choice, resolved to a placed clip by Add as takes.
+    pub audio_master_media: Option<String>,
+    /// Video lanes belonging to the current multicam performance edit.
+    pub performance_tracks: Vec<String>,
+    /// Musical grid mode: 0 off, 1 beats, 2 bars.
+    pub musical_snap: i32,
+    /// Song tempo used by the beat/bar grid.
+    pub beat_bpm: f32,
     pub playhead: f32,
     pub playing: bool,
     transport: slint::Timer,
@@ -2313,6 +2324,95 @@ fn label_of(id: &str) -> String {
         .join(" ")
 }
 
+/// Decodes a short mono RMS envelope for audio matching. The 100 Hz
+/// envelope keeps sync responsive on phones while tolerating different mics.
+fn sync_envelope(
+    path: &str,
+    stream: Option<usize>,
+    start: f64,
+    duration: f64,
+) -> Result<Vec<f32>, String> {
+    let options = concat_media::AudioOptions {
+        start: Some(start),
+        duration: Some(duration.min(45.0)),
+        rate: 4_000,
+        channels: 1,
+        format: concat_media::SampleFormat::I16,
+        stream,
+        ..Default::default()
+    };
+    let mut decoder = concat_media::AudioDecoder::open(path, &options)
+        .map_err(|error| error.to_string())?;
+    let mut samples = Vec::new();
+    while let Some(frame) = decoder.next_i16().map_err(|error| error.to_string())? {
+        samples.extend(frame);
+    }
+    let envelope = samples
+        .chunks_exact(80)
+        .map(|window| {
+            let energy = window
+                .iter()
+                .map(|sample| {
+                    let value = f64::from(*sample);
+                    value * value
+                })
+                .sum::<f64>()
+                / window.len() as f64;
+            energy.sqrt() as f32
+        })
+        .collect();
+    Ok(envelope)
+}
+
+/// Finds the relative offset between two RMS envelopes. Positive lag means
+/// the target's matching sound occurs later in its recording.
+fn sync_lag(reference: &[f32], target: &[f32]) -> Option<(isize, f32)> {
+    let min_overlap = 250usize; // five seconds at 50 Hz
+    if reference.len() < min_overlap || target.len() < min_overlap {
+        return None;
+    }
+    let limit = 2_000isize
+        .min(reference.len() as isize - min_overlap as isize)
+        .min(target.len() as isize - min_overlap as isize);
+    let mut best = (0isize, f32::NEG_INFINITY);
+    let mut runner_up = f32::NEG_INFINITY;
+    for lag in -limit..=limit {
+        let from_ref = (-lag).max(0) as usize;
+        let from_target = lag.max(0) as usize;
+        let count = (reference.len() - from_ref).min(target.len() - from_target);
+        if count < min_overlap {
+            continue;
+        }
+        let (sum_ref, sum_target) = (0..count).fold((0.0f64, 0.0f64), |(a, b), index| {
+            (
+                a + f64::from(reference[from_ref + index]),
+                b + f64::from(target[from_target + index]),
+            )
+        });
+        let (mean_ref, mean_target) = (
+            sum_ref / count as f64,
+            sum_target / count as f64,
+        );
+        let (mut dot, mut var_ref, mut var_target) = (0.0f64, 0.0f64, 0.0f64);
+        for index in 0..count {
+            let a = f64::from(reference[from_ref + index]) - mean_ref;
+            let b = f64::from(target[from_target + index]) - mean_target;
+            dot += a * b;
+            var_ref += a * a;
+            var_target += b * b;
+        }
+        if var_ref < 1.0 || var_target < 1.0 { continue; }
+        let score = (dot / (var_ref * var_target).sqrt()) as f32;
+        if score > best.1 {
+            if (lag - best.0).abs() > 10 { runner_up = runner_up.max(best.1); }
+            best = (lag, score);
+        } else if (lag - best.0).abs() > 10 {
+            runner_up = runner_up.max(score);
+        }
+    }
+    (best.1 >= 0.28 && best.1 - runner_up >= 0.012).then_some(best)
+}
+
 impl Studio {
     /// A window with nothing open: the launch screen, with the recents list
     /// read off disk.
@@ -2359,6 +2459,11 @@ impl Studio {
             waves: RefCell::new(HashMap::new()),
             lanes: crate::panes::timeline::TimelinePane::default(),
             selection: Vec::new(),
+            audio_master_clip: None,
+            audio_master_media: None,
+            performance_tracks: Vec::new(),
+            musical_snap: 0,
+            beat_bpm: 120.0,
             playhead: 0.0,
             // ~20px a second: a ten-second cut fits a pane at its default width.
             playing: false,
@@ -2667,6 +2772,25 @@ impl Studio {
         }) as f32
     }
 
+    /// Interval of the active musical snap grid, in seconds.
+    fn musical_grid_seconds(&self) -> Option<f32> {
+        let beats_per_grid = match self.musical_snap {
+            1 => 1.0,
+            2 => 4.0,
+            _ => return None,
+        };
+        Some(60.0 * beats_per_grid / self.beat_bpm.clamp(30.0, 300.0))
+    }
+
+    pub fn set_musical_snap(&mut self, mode: i32) {
+        self.musical_snap = mode.clamp(0, 2);
+    }
+
+    pub fn set_beat_bpm(&mut self, bpm: f32) {
+        if bpm.is_finite() {
+            self.beat_bpm = bpm.clamp(30.0, 300.0);
+        }
+    }
     /// Clip edges, the playhead and zero all pull, and the nearest inside
     /// the threshold wins.
     /// How far a moving set of clips should shift so the nearest of its
@@ -2676,16 +2800,23 @@ impl Studio {
     /// clip's start, so an end never met the next clip (reported on
     /// Reddit), and a group could snap to where its own clips had been.
     pub fn snap_shift(&self, edges: &[f32], threshold: f32, moving: &[&str]) -> f32 {
-        if !self.lanes.snap {
+        let grid = self.musical_grid_seconds();
+        if !self.lanes.snap && grid.is_none() {
             return 0.0;
         }
-        let mut targets = vec![0.0, self.playhead];
-        for clip in &self.timeline().clips {
-            if moving.contains(&clip.id.as_str()) {
-                continue;
+        let mut targets = Vec::new();
+        if self.lanes.snap {
+            targets.extend([0.0, self.playhead]);
+            for clip in &self.timeline().clips {
+                if moving.contains(&clip.id.as_str()) {
+                    continue;
+                }
+                targets.push(clip.start as f32);
+                targets.push((clip.start + clip.duration) as f32);
             }
-            targets.push(clip.start as f32);
-            targets.push((clip.start + clip.duration) as f32);
+        }
+        if let Some(interval) = grid {
+            targets.extend(edges.iter().map(|edge| (edge / interval).round() * interval));
         }
         let mut best = 0.0;
         let mut best_distance = threshold;
@@ -2702,7 +2833,8 @@ impl Studio {
     }
 
     pub fn snapped(&self, time: f32, threshold: f32, exclude: &str) -> f32 {
-        if !self.lanes.snap {
+        let grid = self.musical_grid_seconds();
+        if !self.lanes.snap && grid.is_none() {
             return time;
         }
         let mut best = time;
@@ -2714,14 +2846,19 @@ impl Studio {
                 best_distance = distance;
             }
         };
-        consider(0.0);
-        consider(self.playhead);
-        for clip in &self.timeline().clips {
-            if clip.id == exclude {
-                continue;
+        if self.lanes.snap {
+            consider(0.0);
+            consider(self.playhead);
+            for clip in &self.timeline().clips {
+                if clip.id == exclude {
+                    continue;
+                }
+                consider(clip.start as f32);
+                consider((clip.start + clip.duration) as f32);
             }
-            consider(clip.start as f32);
-            consider((clip.start + clip.duration) as f32);
+        }
+        if let Some(interval) = grid {
+            consider((time / interval).round() * interval);
         }
         best
     }
@@ -8571,6 +8708,9 @@ impl Studio {
                 self.project_name = info.name.clone();
                 self.export.name = projects::folder_name(&info.name);
                 self.selection.clear();
+                self.audio_master_clip = None;
+                self.audio_master_media = None;
+                self.performance_tracks.clear();
                 self.transition_selected = None;
                 self.media.selected.clear();
                 self.playhead = 0.0;
@@ -8817,6 +8957,9 @@ impl Studio {
         self.echo = None;
         self.dirty = false;
         self.selection.clear();
+        self.audio_master_clip = None;
+        self.audio_master_media = None;
+        self.performance_tracks.clear();
         self.transition_selected = None;
         self.gesture = Gesture::None;
         self.handle(crate::panes::Msg::Monitor(
@@ -9466,6 +9609,16 @@ impl Studio {
         });
 
         editor.set_selected_clip(self.selected());
+        editor.set_selection_count(self.selection.len() as i32);
+        let master = self.audio_master_clip.as_deref().filter(|id| self.clip(id).is_some());
+        editor.set_audio_master_set(master.is_some());
+        editor.set_audio_master_selected(master.is_some_and(|id| self.selection.iter().any(|selected| selected == id)));
+        let performance_mode = self.sole_selection().and_then(|id| self.clip(&id)).is_some_and(|clip| {
+            clip.kind == model::ClipKind::Video && self.performance_tracks.contains(&clip.track_id)
+        });
+        editor.set_performance_mode(performance_mode);
+        editor.set_musical_snap(self.musical_snap);
+        editor.set_beat_bpm(self.beat_bpm);
         editor.set_selected_transition(self.selected_transition_data());
         let (knobs, choices) = self.transition_knobs();
         sync(&models.transition_knobs, knobs);
@@ -10625,6 +10778,311 @@ impl Studio {
             }
         };
         self.apply(command);
+    }
+
+    /// Sets or clears the sole selected audio-bearing clip as the master
+    /// for performance sync.
+    pub fn set_audio_master(&mut self) {
+        let Some(id) = self.sole_selection() else {
+            self.notify("Select one video or audio clip to use as the audio master.", true);
+            return;
+        };
+        let Some(clip) = self.clip(&id) else { return; };
+        let Some(media) = self.project().media_by_id(&clip.media_id) else { return; };
+        if !media.has_audio
+            || !matches!(clip.kind, model::ClipKind::Video | model::ClipKind::Audio)
+        {
+            self.notify("The audio master needs to be a video or audio clip with sound.", true);
+            return;
+        }
+        let media_id = clip.media_id.clone();
+        if self.audio_master_clip.as_deref() == Some(id.as_str()) {
+            self.audio_master_clip = None;
+            self.audio_master_media = None;
+            self.notify("Audio master cleared. The first selected clip will be used for sync.", false);
+        } else {
+            self.audio_master_clip = Some(id);
+            self.audio_master_media = Some(media_id);
+            self.notify("Audio master selected. Select your takes and tap Sync to master.", false);
+        }
+    }
+
+    /// Aligns selected clips by their decoded audio. An explicitly chosen
+    /// audio master wins; otherwise the first selected clip is the reference.
+    /// Matched camera audio is muted so the master remains the continuous
+    /// soundtrack. Decoding and matching run off the UI thread, and one Undo
+    /// restores all the moves and audio changes.
+    pub fn sync_selected_clips(&mut self) {
+        let selected = self.selection.clone();
+        let master_id = self
+            .audio_master_clip
+            .clone()
+            .filter(|id| self.clip(id).is_some())
+            .or_else(|| selected.first().cloned());
+        let Some(master_id) = master_id else {
+            self.notify("Choose an audio master clip first.", true);
+            return;
+        };
+        let target_ids: Vec<String> = selected
+            .into_iter()
+            .filter(|id| id != &master_id)
+            .collect();
+        if target_ids.is_empty() {
+            self.notify("Select one or more takes to sync to the audio master.", true);
+            return;
+        }
+        let snapshot = |id: &str| -> Option<(String, String, Option<usize>, f64, f64, f64, String, model::ClipKind, bool)> {
+            let clip = self.clip(id)?;
+            let media = self.project().media_by_id(&clip.media_id)?;
+            if !media.has_audio
+                || !matches!(clip.kind, model::ClipKind::Video | model::ClipKind::Audio)
+            {
+                return None;
+            }
+            Some((
+                clip.id.clone(),
+                media.path.clone(),
+                clip.audio_stream.map(|stream| stream as usize),
+                clip.source_start,
+                clip.duration,
+                clip.start,
+                clip.track_id.clone(),
+                clip.kind,
+                clip.muted == Some(true),
+            ))
+        };
+        let Some(master) = snapshot(&master_id) else {
+            self.notify("The audio master needs an audio track.", true);
+            return;
+        };
+        if let Some(clip) = self.clip(&master_id)
+            && ((clip.speed - 1.0).abs() > 1e-6 || clip.speed_curve.is_some())
+        {
+            self.notify("Audio sync currently needs normal-speed clips.", true);
+            return;
+        }
+        let mut targets = Vec::new();
+        for id in target_ids {
+            let Some(target) = snapshot(&id) else { continue; };
+            if let Some(clip) = self.clip(&id)
+                && ((clip.speed - 1.0).abs() > 1e-6 || clip.speed_curve.is_some())
+            {
+                self.notify("Audio sync currently needs normal-speed clips.", true);
+                return;
+            }
+            targets.push(target);
+        }
+        if targets.is_empty() {
+            self.notify("Select takes with audio, then sync them to the master.", true);
+            return;
+        }
+        let reference_start = master.5;
+        let master_id_for_edit = master.0.clone();
+        let master_was_muted = master.8;
+        let work = move || {
+            let reference = sync_envelope(&master.1, master.2, master.3, master.4)
+                .map_err(|error| format!("Could not read master audio: {error}"))?;
+            let mut moves = Vec::new();
+            let mut muted_cameras = Vec::new();
+            let mut matched = 0usize;
+            let mut failed = 0usize;
+            for target in targets {
+                let envelope = match sync_envelope(&target.1, target.2, target.3, target.4) {
+                    Ok(envelope) => envelope,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                };
+                let Some((lag, _score)) = sync_lag(&reference, &envelope) else {
+                    failed += 1;
+                    continue;
+                };
+                let start = reference_start - lag as f64 / 50.0;
+                if start < 0.0 {
+                    failed += 1;
+                    continue;
+                }
+                matched += 1;
+                if (start - target.5).abs() > 0.005 {
+                    moves.push(ClipMove {
+                        clip_id: target.0.clone(),
+                        start,
+                        track_id: target.6,
+                    });
+                }
+                if target.7 == model::ClipKind::Video && !target.8 {
+                    muted_cameras.push(target.0);
+                }
+            }
+            Ok::<_, String>((moves, muted_cameras, matched, failed, master_id_for_edit, master_was_muted))
+        };
+        spawn_in_project(work, move |studio, _, _, result| match result {
+            Err(error) => studio.notify(&error, true),
+            Ok((moves, muted_cameras, matched, failed, master_id, master_was_muted)) => {
+                if matched == 0 {
+                    studio.notify(
+                        "No reliable matches found. Try longer takes with clearer shared audio.",
+                        true,
+                    );
+                    return;
+                }
+                let mut commands = Vec::new();
+                if !moves.is_empty() {
+                    commands.push(Command::MoveClips { moves });
+                }
+                if master_was_muted {
+                    commands.push(Command::UpdateClip {
+                        clip_id: master_id,
+                        patch: ClipPatch { muted: Some(false), ..Default::default() },
+                    });
+                }
+                commands.extend(muted_cameras.into_iter().map(|clip_id| Command::UpdateClip {
+                    clip_id,
+                    patch: ClipPatch { muted: Some(true), ..Default::default() },
+                }));
+                if !commands.is_empty() {
+                    studio.apply(Command::Batch { commands });
+                }
+                let message = if failed > 0 {
+                    format!("Synced {matched} take(s); {failed} had no clear match.")
+                } else {
+                    format!("Synced {matched} take(s) and kept the master audio continuous.")
+                };
+                studio.notify(&message, failed > 0);
+            }
+        });
+        self.notify("Matching takes to the audio master…", false);
+    }
+    /// Nudges the selected clips by a small number of timeline frames for
+    /// manual sync cleanup. The move remains a single undoable edit.
+    pub fn nudge_selection_frames(&mut self, frames: i32) {
+        if self.selection.is_empty() || frames == 0 {
+            return;
+        }
+        let offset = f64::from(frames.clamp(-10, 10)) / self.timeline().video.rate().max(1.0);
+        let moves: Vec<ClipMove> = self
+            .selection
+            .iter()
+            .filter_map(|id| {
+                let clip = self.clip(id)?;
+                Some(ClipMove {
+                    clip_id: clip.id.clone(),
+                    start: (clip.start + offset).max(0.0),
+                    track_id: clip.track_id.clone(),
+                })
+            })
+            .collect();
+        if moves.is_empty() {
+            return;
+        }
+        let Some(moves) = self.timeline().resolve_moves(&moves) else {
+            self.notify("Those clips cannot move there without overlapping.", true);
+            return;
+        };
+        self.apply(Command::MoveClips { moves });
+    }
+    /// Cuts the synced performance to the selected camera angle at the
+    /// playhead. A one-frame opacity ramp keeps the switch clean while the
+    /// master audio clip remains untouched.
+    pub fn cut_to_performance_angle(&mut self) {
+        let Some(selected_id) = self.sole_selection() else {
+            self.notify("Select one synced video angle first.", true);
+            return;
+        };
+        let Some(selected) = self.clip(&selected_id) else { return; };
+        if selected.kind != model::ClipKind::Video
+            || !self.performance_tracks.contains(&selected.track_id)
+        {
+            self.notify("Select a video take from the synced performance lanes.", true);
+            return;
+        }
+        let (selected_track, at_time, frame) = (
+            selected.track_id.clone(),
+            f64::from(self.playhead.max(0.0)),
+            1.0 / self.timeline().video.rate().max(1.0),
+        );
+        if selected.start > at_time || selected.start + selected.duration <= at_time {
+            self.notify("Move the playhead inside the selected camera take first.", true);
+            return;
+        }
+        let active: Vec<Clip> = self
+            .performance_tracks
+            .iter()
+            .filter_map(|track_id| {
+                self.timeline().clips.iter().find(|clip| {
+                    clip.track_id == *track_id
+                        && clip.kind == model::ClipKind::Video
+                        && clip.start <= at_time
+                        && clip.start + clip.duration > at_time
+                }).cloned()
+            })
+            .collect();
+        if active.is_empty() {
+            self.notify("No synced camera angles cover the playhead.", true);
+            return;
+        }
+        let mut commands = Vec::with_capacity(active.len() * 2);
+        for clip in active {
+            let at = ((at_time - clip.start) / clip.duration).clamp(0.0, 1.0);
+            let before = ((at_time - frame - clip.start) / clip.duration).clamp(0.0, 1.0);
+            let value = if clip.track_id == selected_track { 1.0 } else { 0.0 };
+            if before < at {
+                commands.push(Command::SetClipKey {
+                    clip_id: clip.id.clone(),
+                    property: model::KeyProperty::Opacity,
+                    at: before,
+                    value: clip.value_at(model::KeyProperty::Opacity, before),
+                    ease: model::KeyEase::LINEAR,
+                });
+            }
+            commands.push(Command::SetClipKey {
+                clip_id: clip.id,
+                property: model::KeyProperty::Opacity,
+                at,
+                value,
+                ease: model::KeyEase::LINEAR,
+            });
+        }
+        if !commands.is_empty() {
+            self.apply(Command::Batch { commands });
+            self.notify("Cut to the selected camera angle.", false);
+        }
+    }
+    /// Applies a gentle 12% scale move across the selected visual clip.
+    /// The two endpoints replace any existing scale animation in one undo step.
+    pub fn slow_zoom(&mut self, zoom_in: bool) {
+        let Some(clip_id) = self.sole_selection() else { return; };
+        let Some(clip) = self.clip(&clip_id) else { return; };
+        if clip.duration <= model::KEY_EPSILON || !clip.kind.is_visual() { return; }
+        let base = clip.scale.max(0.05);
+        let (start, end) = if zoom_in {
+            (base, base * 1.12)
+        } else {
+            (base * 1.12, base)
+        };
+        self.apply(Command::Batch {
+            commands: vec![
+                Command::ClearClipKeys {
+                    clip_id: clip_id.clone(),
+                    property: model::KeyProperty::Scale,
+                },
+                Command::SetClipKey {
+                    clip_id: clip_id.clone(),
+                    property: model::KeyProperty::Scale,
+                    at: 0.0,
+                    value: start,
+                    ease: model::KeyEase::IN_OUT,
+                },
+                Command::SetClipKey {
+                    clip_id,
+                    property: model::KeyProperty::Scale,
+                    at: 1.0,
+                    value: end,
+                    ease: model::KeyEase::IN_OUT,
+                },
+            ],
+        });
     }
 
     /// Takes every key off a field, leaving it its constant.
@@ -11864,6 +12322,16 @@ impl Studio {
             ));
             rows.push(rule());
         }
+        if item.has_audio {
+            rows.push(rule());
+            let is_master = self.audio_master_media.as_deref() == Some(id);
+            rows.push(action(
+                "audio-master",
+                if is_master { "Clear performance audio master".into() } else { "Use as performance audio master".into() },
+                Glyph::Waveform,
+                false,
+            ));
+        }
         rows.push(action("remove", t("common.remove"), Glyph::Trash, true));
         rows
     }
@@ -11883,6 +12351,17 @@ impl Studio {
         };
         match action {
             "add" => self.place_at_playhead(&format!("media:{row}")),
+            "audio-master" => {
+                if self.audio_master_media.as_deref() == Some(id) {
+                    self.audio_master_media = None;
+                    self.audio_master_clip = None;
+                    self.notify("Performance audio master cleared.", false);
+                } else {
+                    self.audio_master_media = Some(id.to_owned());
+                    self.audio_master_clip = None;
+                    self.notify("Audio source chosen. Select the takes and tap Add as takes.", false);
+                }
+            }
             "remove" => self.handle(crate::panes::Msg::Media(
                 crate::panes::media_bin::MediaMsg::Remove(row),
             )),
